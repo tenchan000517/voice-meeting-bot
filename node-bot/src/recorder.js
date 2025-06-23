@@ -14,12 +14,14 @@ export class VoiceRecorder {
     this.client = client;
     this.logger = logger;
     this.activeRecordings = new Map();
+    this.completedRecordings = new Map(); // For 24-hour retention
     this.tempDir = process.env.TEMP_DIR || './temp';
     this.chunkDuration = parseInt(process.env.CHUNK_DURATION) || 1800000; // 30 minutes
     this.maxDuration = parseInt(process.env.MAX_RECORDING_DURATION) || 10800000; // 3 hours
     this.apiUrl = process.env.PYTHON_API_URL || 'http://localhost:8000';
     
     this._ensureTempDir();
+    this._startCleanupTimer();
   }
 
   async _ensureTempDir() {
@@ -130,7 +132,14 @@ export class VoiceRecorder {
       // Trigger transcription processing
       await this._triggerTranscription(recording);
 
-      // Clean up
+      // Move to completed recordings for 24-hour retention
+      recording.status = 'completed';
+      this.completedRecordings.set(recording.meetingId, {
+        ...recording,
+        completedAt: new Date()
+      });
+      
+      // Remove from active recordings
       this.activeRecordings.delete(channelId);
 
       this.logger.info(`Recording stopped: ${recording.meetingId}, duration: ${duration} minutes`);
@@ -479,12 +488,54 @@ export class VoiceRecorder {
     return recordings;
   }
 
+  // Find recording by meetingId (for webhook server)
+  findRecordingByMeetingId(meetingId) {
+    // Check active recordings first
+    for (const [channelId, recording] of this.activeRecordings) {
+      if (recording.meetingId === meetingId) {
+        return { channelId, ...recording };
+      }
+    }
+    
+    // Check completed recordings
+    const completedRecording = this.completedRecordings.get(meetingId);
+    if (completedRecording) {
+      return completedRecording;
+    }
+    
+    return null;
+  }
+
+  // Start cleanup timer for completed recordings
+  _startCleanupTimer() {
+    // Clean up every hour
+    setInterval(() => {
+      this._cleanupCompletedRecordings();
+    }, 60 * 60 * 1000);
+  }
+  
+  // Clean up completed recordings older than 24 hours
+  _cleanupCompletedRecordings() {
+    const now = new Date();
+    const maxAge = 24 * 60 * 60 * 1000; // 24 hours
+    
+    for (const [meetingId, recording] of this.completedRecordings) {
+      if (now - recording.completedAt > maxAge) {
+        this.completedRecordings.delete(meetingId);
+        this.logger.info(`Cleaned up completed recording: ${meetingId}`);
+      }
+    }
+  }
+
   async cleanup() {
     try {
       // Stop all active recordings
       for (const channelId of this.activeRecordings.keys()) {
         await this.stopRecording(channelId, 'Bot shutdown');
       }
+
+      // Clear completed recordings
+      this.completedRecordings.clear();
 
       // Clean up old temp files
       const files = await fs.readdir(this.tempDir);

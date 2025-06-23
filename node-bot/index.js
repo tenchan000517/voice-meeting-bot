@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import { VoiceRecorder } from './src/recorder.js';
 import { CommandHandler } from './src/commands.js';
 import { VoiceManager } from './src/voice-manager.js';
+import WebhookServer from './src/webhook-server.js';
 
 // Load environment variables
 dotenv.config();
@@ -49,15 +50,25 @@ const client = new Client({
   ]
 });
 
-// Initialize recorder, voice manager, and command handler
+// Initialize recorder, voice manager, command handler, and webhook server
 const recorder = new VoiceRecorder(client, logger);
 const voiceManager = new VoiceManager(client, logger);
 const commandHandler = new CommandHandler(client, recorder, logger, voiceManager);
+const webhookServer = new WebhookServer(client, recorder);
 
 // Bot ready event
 client.once('ready', async () => {
   logger.info(`Logged in as ${client.user.tag}!`);
   logger.info('Voice Meeting Recorder Bot is ready!');
+  
+  // Start webhook server
+  try {
+    const webhookPort = process.env.WEBHOOK_PORT || 3002;
+    await webhookServer.start(webhookPort);
+    logger.info(`Webhook server started on port ${webhookPort}`);
+  } catch (error) {
+    logger.error('Failed to start webhook server:', error);
+  }
   
   // Register slash commands (development - register to specific guild for faster updates)
   const devGuildId = process.env.DEV_GUILD_ID;
@@ -68,23 +79,26 @@ client.once('ready', async () => {
   }
 });
 
-// Handle slash commands
+// Handle slash commands and button interactions
 client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isCommand()) return;
-
   try {
-    switch (interaction.commandName) {
-      case 'record':
-        await commandHandler.handleRecordCommand(interaction);
-        break;
-      case 'voice':
-        await commandHandler.handleVoiceCommand(interaction);
-        break;
-      default:
-        await interaction.reply({
-          content: '❌ 不明なコマンドです。',
-          ephemeral: true
-        });
+    if (interaction.isCommand()) {
+      switch (interaction.commandName) {
+        case 'record':
+          await commandHandler.handleRecordCommand(interaction);
+          break;
+        case 'voice':
+          await commandHandler.handleVoiceCommand(interaction);
+          break;
+        default:
+          await interaction.reply({
+            content: '❌ 不明なコマンドです。',
+            ephemeral: true
+          });
+      }
+    } else if (interaction.isButton()) {
+      // Handle download button interactions
+      await handleDownloadButton(interaction);
     }
   } catch (error) {
     logger.error('Interaction handling error:', error);
@@ -97,6 +111,49 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 });
+
+// Handle download button interactions
+async function handleDownloadButton(interaction) {
+  const customId = interaction.customId;
+  
+  if (customId.startsWith('download_')) {
+    const [, type, meetingId] = customId.split('_');
+    const pythonApiUrl = process.env.PYTHON_API_URL || 'http://localhost:8000';
+    
+    let downloadUrl;
+    let filename;
+    let description;
+    
+    switch (type) {
+      case 'summary':
+        downloadUrl = `${pythonApiUrl}/download/meeting/${meetingId}/summary`;
+        filename = `meeting_summary_${meetingId}.md`;
+        description = '📋 議事録';
+        break;
+      case 'transcript':
+        downloadUrl = `${pythonApiUrl}/download/meeting/${meetingId}/transcript`;
+        filename = `meeting_transcript_${meetingId}.txt`;
+        description = '📄 転写テキスト';
+        break;
+      case 'chunks':
+        downloadUrl = `${pythonApiUrl}/download/meeting/${meetingId}/chunks`;
+        filename = `meeting_chunks_${meetingId}.json`;
+        description = '🎵 音声チャンク情報';
+        break;
+      default:
+        await interaction.reply({
+          content: '❌ 不明なダウンロードタイプです。',
+          ephemeral: true
+        });
+        return;
+    }
+    
+    await interaction.reply({
+      content: `${description}のダウンロードリンク:\n${downloadUrl}\n\nファイル名: \`${filename}\``,
+      ephemeral: true
+    });
+  }
+}
 
 // Basic ping command for testing (legacy)
 client.on('messageCreate', async (message) => {
@@ -166,6 +223,7 @@ process.on('SIGINT', async () => {
   try {
     await recorder.cleanup();
     await voiceManager.cleanup();
+    await webhookServer.stop();
     client.destroy();
     process.exit(0);
   } catch (error) {
@@ -180,6 +238,7 @@ process.on('SIGTERM', async () => {
   try {
     await recorder.cleanup();
     await voiceManager.cleanup();
+    await webhookServer.stop();
     client.destroy();
     process.exit(0);
   } catch (error) {

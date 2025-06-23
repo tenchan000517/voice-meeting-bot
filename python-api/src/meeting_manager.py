@@ -179,6 +179,37 @@ class MeetingManager:
         finally:
             db.close()
     
+    async def get_transcript_segments(self, meeting_id: str) -> Optional[List[Dict]]:
+        """Get transcript segments as list for download endpoints"""
+        try:
+            db = self.db_session()
+            
+            transcripts = db.query(Transcript).filter(
+                Transcript.meeting_id == meeting_id
+            ).order_by(Transcript.start_time).all()
+            
+            if not transcripts:
+                return None
+            
+            segments = []
+            for transcript in transcripts:
+                segments.append({
+                    'speaker_id': transcript.speaker_id,
+                    'speaker_name': transcript.speaker_name,
+                    'text': transcript.text,
+                    'start_time': transcript.start_time,
+                    'duration_seconds': transcript.duration_seconds,
+                    'audio_file_path': transcript.audio_file_path
+                })
+            
+            return segments
+            
+        except Exception as e:
+            logger.error(f"Error retrieving transcript segments for meeting {meeting_id}: {e}")
+            return None
+        finally:
+            db.close()
+    
     async def save_summary(
         self,
         meeting_id: str,
