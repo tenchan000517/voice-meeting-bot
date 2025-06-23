@@ -28,9 +28,8 @@ class MeetingManager:
         participants: Optional[List[str]] = None
     ) -> Meeting:
         """Create a new meeting record"""
+        db = self.db_session()
         try:
-            db = self.db_session()
-            
             # Create meeting record
             meeting = Meeting(
                 meeting_id=meeting_id,
@@ -55,6 +54,13 @@ class MeetingManager:
             db.commit()
             
             logger.info(f"Created meeting record: {meeting_id}")
+            
+            # Verify the record was actually saved
+            saved_meeting = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
+            if not saved_meeting:
+                raise Exception(f"Meeting record not found after commit: {meeting_id}")
+            
+            logger.info(f"Verified meeting record saved successfully: {meeting_id}")
             return meeting
             
         except Exception as e:
@@ -66,9 +72,8 @@ class MeetingManager:
     
     async def update_meeting_status(self, meeting_id: str, status: str) -> bool:
         """Update meeting status"""
+        db = self.db_session()
         try:
-            db = self.db_session()
-            
             meeting = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
             if meeting:
                 meeting.status = status
@@ -83,10 +88,13 @@ class MeetingManager:
                         meeting.duration_minutes = int(duration)
                 
                 db.commit()
-                logger.info(f"Updated meeting {meeting_id} status to {status}")
+                
+                # Verify the update was saved
+                db.refresh(meeting)
+                logger.info(f"Updated meeting {meeting_id} status to {status} (verified: {meeting.status})")
                 return True
             else:
-                logger.warning(f"Meeting not found: {meeting_id}")
+                logger.error(f"Meeting not found for status update: {meeting_id}")
                 return False
                 
         except Exception as e:

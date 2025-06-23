@@ -17,10 +17,44 @@ from src.meeting_manager import MeetingManager
 # Load environment variables
 load_dotenv()
 
-# Configure logging
+# Configure logging with file rotation
+import logging.handlers
+import os
+from pathlib import Path
+
+# Create logs directory
+log_dir = Path(__file__).parent / "logs"
+log_dir.mkdir(exist_ok=True)
+
+# Configure rotating file handler
+error_handler = logging.handlers.RotatingFileHandler(
+    log_dir / "api-error.log",
+    maxBytes=5*1024*1024,  # 5MB
+    backupCount=3
+)
+error_handler.setLevel(logging.ERROR)
+
+access_handler = logging.handlers.RotatingFileHandler(
+    log_dir / "api-access.log", 
+    maxBytes=5*1024*1024,  # 5MB
+    backupCount=3
+)
+access_handler.setLevel(logging.INFO)
+
+# Configure console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+
+# Set formatter
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+error_handler.setFormatter(formatter)
+access_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Configure root logger
 logging.basicConfig(
     level=getattr(logging, os.getenv('LOG_LEVEL', 'INFO')),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    handlers=[console_handler, access_handler, error_handler]
 )
 logger = logging.getLogger(__name__)
 
