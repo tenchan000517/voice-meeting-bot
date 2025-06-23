@@ -1,5 +1,6 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 import uvicorn
 import os
@@ -8,6 +9,9 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 import asyncio
 from dotenv import load_dotenv
+from pathlib import Path
+import json
+import httpx
 
 from src.models import init_db
 from src.transcription import TranscriptionService
@@ -79,6 +83,20 @@ transcription_service = TranscriptionService()
 summarization_service = SummarizationService()
 meeting_manager = MeetingManager()
 
+async def send_webhook_notification(meeting_id: str, webhook_data: dict):
+    """Send webhook notification to Discord bot"""
+    try:
+        webhook_url = os.getenv('DISCORD_WEBHOOK_URL', 'http://localhost:3002/webhook/meeting-completed')
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(webhook_url, json=webhook_data)
+            response.raise_for_status()
+            logger.info(f"Webhook sent successfully for meeting {meeting_id}")
+    except httpx.TimeoutException:
+        logger.warning(f"Webhook timeout for meeting {meeting_id} - falling back to polling")
+    except Exception as e:
+        logger.error(f"Webhook failed for meeting {meeting_id}: {e} - falling back to polling")
+
 async def process_transcription(
     file_path: str,
     meeting_id: str,
@@ -129,6 +147,19 @@ async def process_transcription(
             if await meeting_manager.check_all_chunks_completed(meeting_id):
                 logger.info(f"All chunks completed for meeting {meeting_id}, triggering summarization")
                 await meeting_manager.trigger_hierarchical_summarization(meeting_id)
+                
+                # Send webhook notification after summarization is complete
+                webhook_data = {
+                    "meeting_id": meeting_id,
+                    "event": "meeting_completed",
+                    "timestamp": datetime.now().isoformat(),
+                    "download_links": {
+                        "summary": f"/download/meeting/{meeting_id}/summary",
+                        "transcript": f"/download/meeting/{meeting_id}/transcript",
+                        "chunks": f"/download/meeting/{meeting_id}/chunks"
+                    }
+                }
+                await send_webhook_notification(meeting_id, webhook_data)
         else:
             logger.warning(f"No transcription text to save for meeting {meeting_id}")
             
@@ -284,7 +315,7 @@ async def get_meeting_status(meeting_id: str) -> MeetingStatus:
 async def get_meeting_transcript(meeting_id: str):
     """Get full transcript for a meeting"""
     try:
-        transcript = await meeting_manager.get_transcript(meeting_id)
+        transcript = await meeting_manager.get_meeting_transcript(meeting_id)
         if not transcript:
             raise HTTPException(status_code=404, detail="Transcript not found")
         
@@ -392,6 +423,140 @@ async def health_check():
             "error": str(e),
             "timestamp": datetime.now()
         }
+
+@app.get("/download/meeting/{meeting_id}/summary")
+async def download_meeting_summary(meeting_id: str):
+    """Download meeting summary as Markdown file"""
+    try:
+        output_dir = Path(__file__).parent / "output"
+        
+        # Find the summary file for the meeting
+        summary_files = list(output_dir.glob(f"meeting_{meeting_id}_*.md"))
+        if not summary_files:
+            raise HTTPException(status_code=404, detail="Summary not found")
+        
+        summary_file = summary_files[0]  # Get the latest file
+        
+        if not summary_file.exists():
+            raise HTTPException(status_code=404, detail="Summary file not found")
+        
+        return FileResponse(
+            path=str(summary_file),
+            filename=f"meeting_summary_{meeting_id}.md",
+            media_type="text/markdown"
+        )
+        
+    except Exception as e:
+        logger.error(f"Download summary error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/download/meeting/{meeting_id}/transcript")
+async def download_meeting_transcript(meeting_id: str):
+    """Download meeting transcript as plain text"""
+    try:
+        transcript_segments = await meeting_manager.get_transcript_segments(meeting_id)
+        if not transcript_segments:
+            raise HTTPException(status_code=404, detail="Transcript not found")
+        
+        # Format transcript as plain text
+        transcript_text = f"Meeting Transcript: {meeting_id}\n"
+        transcript_text += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        transcript_text += "=" * 50 + "\n\n"
+        
+        for segment in transcript_segments:
+            timestamp = segment.get('start_time', 'Unknown')
+            speaker = segment.get('speaker_name', 'Unknown Speaker')
+            text = segment.get('text', '')
+            transcript_text += f"[{timestamp}] {speaker}: {text}\n\n"
+        
+        return PlainTextResponse(
+            content=transcript_text,
+            headers={
+                "Content-Disposition": f"attachment; filename=meeting_transcript_{meeting_id}.txt"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Download transcript error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/download/meeting/{meeting_id}/chunks")
+async def download_meeting_chunks_info(meeting_id: str):
+    """Download meeting audio chunks information as JSON"""
+    try:
+        # Get meeting info from database
+        meeting_info = await meeting_manager.get_meeting_status(meeting_id)
+        if not meeting_info:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        
+        # Get transcript segments to identify audio files
+        transcript_segments = await meeting_manager.get_transcript_segments(meeting_id)
+        if not transcript_segments:
+            raise HTTPException(status_code=404, detail="No audio chunks found")
+        
+        chunks_info = []
+        for idx, segment in enumerate(transcript_segments):
+            audio_file_path = segment.get('audio_file_path', '')
+            if audio_file_path:
+                filename = Path(audio_file_path).name
+                chunks_info.append({
+                    "chunk_index": idx,
+                    "filename": filename,
+                    "speaker_id": segment.get('speaker_id', ''),
+                    "speaker_name": segment.get('speaker_name', ''),
+                    "duration": segment.get('duration_seconds', 0),
+                    "start_time": str(segment.get('start_time', '')),
+                    "download_url": f"/download/meeting/{meeting_id}/chunk/{filename}"
+                })
+        
+        chunks_data = {
+            "meeting_id": meeting_id,
+            "total_chunks": len(chunks_info),
+            "chunks": chunks_info,
+            "generated_at": datetime.now().isoformat()
+        }
+        
+        return PlainTextResponse(
+            content=json.dumps(chunks_data, indent=2),
+            headers={
+                "Content-Disposition": f"attachment; filename=meeting_chunks_{meeting_id}.json",
+                "Content-Type": "application/json"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Download chunks info error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/download/meeting/{meeting_id}/chunk/{filename}")
+async def download_audio_chunk(meeting_id: str, filename: str):
+    """Download individual audio chunk file"""
+    try:
+        # Security check: ensure filename doesn't contain path traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        
+        # Look for the file in temp directory first (for recent recordings)
+        temp_dir = Path(__file__).parent.parent / "node-bot" / "temp"
+        chunk_file = temp_dir / filename
+        
+        if not chunk_file.exists():
+            # Look in output directory as backup
+            output_dir = Path(__file__).parent / "temp"
+            chunk_file = output_dir / filename
+        
+        if not chunk_file.exists():
+            raise HTTPException(status_code=404, detail="Audio chunk not found")
+        
+        return FileResponse(
+            path=str(chunk_file),
+            filename=filename,
+            media_type="audio/wav"
+        )
+        
+    except Exception as e:
+        logger.error(f"Download audio chunk error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     # Run the API server
