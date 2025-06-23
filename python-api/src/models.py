@@ -65,6 +65,8 @@ class ProcessingStatus(Base):
     processing_start = Column(DateTime, nullable=True)
     processing_end = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    total_chunks = Column(Integer, default=0)  # Total number of audio chunks
+    completed_chunks = Column(Integer, default=0)  # Number of completed transcriptions
 
 class AudioFile(Base):
     """Track audio files and cleanup"""

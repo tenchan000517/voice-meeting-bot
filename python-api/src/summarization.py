@@ -316,6 +316,97 @@ class SummarizationService:
 """
         return content
     
+    async def create_hierarchical_summary(
+        self,
+        meeting_id: str,
+        chunk_transcripts: List[Dict[str, str]],
+        participants: List[str],
+        total_duration: int
+    ) -> Dict[str, str]:
+        """Create hierarchical summary for long meetings"""
+        try:
+            logger.info(f"Creating hierarchical summary for {len(chunk_transcripts)} chunks")
+            
+            # Phase 1: Summarize each chunk individually
+            chunk_summaries = []
+            for i, chunk in enumerate(chunk_transcripts):
+                logger.info(f"Summarizing chunk {i+1}/{len(chunk_transcripts)}")
+                
+                chunk_prompt = f"""
+以下は会議の一部（{i*30}分〜{(i+1)*30}分）の文字起こしです。
+この部分の要点を200文字程度で要約してください。
+
+【文字起こし】
+{chunk['text']}
+
+【要約】
+"""
+                chunk_summary = await self._generate_with_ollama(chunk_prompt)
+                chunk_summaries.append({
+                    'chunk_index': i,
+                    'time_range': f"{i*30}分〜{(i+1)*30}分",
+                    'summary': chunk_summary.strip()
+                })
+                
+                # Small delay to avoid overwhelming Ollama
+                await asyncio.sleep(1)
+            
+            # Phase 2: Create final summary from chunk summaries
+            combined_summaries = "\n\n".join([
+                f"【{cs['time_range']}】\n{cs['summary']}" 
+                for cs in chunk_summaries
+            ])
+            
+            final_prompt = f"""
+以下は{total_duration}分間の会議の各30分ごとの要約です。
+これらを統合して、会議全体の議事録を作成してください。
+
+【会議情報】
+- 会議ID: {meeting_id}
+- 参加者: {', '.join(participants)}
+- 総時間: {total_duration}分
+
+【各時間帯の要約】
+{combined_summaries}
+
+【出力形式】
+# 会議議事録
+
+## 📋 会議概要
+- **日時**: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+- **時間**: {total_duration}分
+- **参加者**: {len(participants)}名
+
+## 📝 会議の流れ
+（時系列での主要トピックを記載）
+
+## ⭐ 主な議題・決定事項
+（重要な決定事項を箇条書きで）
+
+## ✅ 今後のアクション
+（必要なアクションアイテムを記載）
+
+## 📌 補足事項
+（その他の重要事項があれば記載）
+"""
+            
+            final_summary = await self._generate_with_ollama(final_prompt)
+            
+            # Return comprehensive result
+            return {
+                'full_summary': final_summary,
+                'chunk_summaries': chunk_summaries,
+                'meeting_id': meeting_id,
+                'generated_at': datetime.now().isoformat(),
+                'participants': participants,
+                'duration_minutes': total_duration,
+                'chunk_count': len(chunk_transcripts)
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to create hierarchical summary: {e}")
+            raise
+    
     async def cleanup_old_summaries(self, days: int = 30):
         """Clean up old summary files"""
         try:

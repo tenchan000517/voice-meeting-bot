@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -79,6 +79,68 @@ transcription_service = TranscriptionService()
 summarization_service = SummarizationService()
 meeting_manager = MeetingManager()
 
+async def process_transcription(
+    file_path: str,
+    meeting_id: str,
+    speaker_id: str,
+    timestamp: str,
+    chunk_index: str = None
+):
+    """Process transcription and save to database"""
+    try:
+        # Handle None values with defaults
+        if not meeting_id:
+            meeting_id = "unknown_meeting"
+            logger.warning("Meeting ID is None, using default")
+        
+        if not speaker_id:
+            speaker_id = "unknown_speaker"
+            logger.warning("Speaker ID is None, using default")
+        
+        logger.info(f"Processing transcription for meeting: {meeting_id}, speaker: {speaker_id}, chunk: {chunk_index}")
+        
+        # Perform transcription
+        result = await transcription_service.transcribe_file(
+            file_path,
+            meeting_id,
+            speaker_id,
+            timestamp
+        )
+        
+        # Save to database
+        if result and result.get("text"):
+            await meeting_manager.add_transcript_segment(
+                meeting_id=meeting_id,
+                speaker_id=speaker_id,
+                speaker_name=f"User_{speaker_id}",
+                text=result["text"],
+                confidence=result.get("confidence", 0.0),
+                start_time=datetime.fromisoformat(result["timestamp"]) if result.get("timestamp") else datetime.utcnow(),
+                duration_seconds=result.get("duration", 0.0),
+                audio_file_path=file_path
+            )
+            
+            logger.info(f"Transcription saved to database for meeting {meeting_id}")
+            
+            # Update completed chunks count
+            await meeting_manager.increment_completed_chunks(meeting_id)
+            
+            # Check if all chunks are completed
+            if await meeting_manager.check_all_chunks_completed(meeting_id):
+                logger.info(f"All chunks completed for meeting {meeting_id}, triggering summarization")
+                await meeting_manager.trigger_hierarchical_summarization(meeting_id)
+        else:
+            logger.warning(f"No transcription text to save for meeting {meeting_id}")
+            
+    except Exception as e:
+        logger.error(f"Failed to process transcription: {e}")
+        if meeting_id and meeting_id != "unknown_meeting":
+            await meeting_manager.update_processing_status(
+                meeting_id,
+                transcription_status="failed",
+                error_message=str(e)
+            )
+
 # Pydantic models
 class TranscriptionRequest(BaseModel):
     meeting_id: str
@@ -135,9 +197,9 @@ async def root():
 async def transcribe_audio(
     background_tasks: BackgroundTasks,
     audio_file: UploadFile = File(...),
-    meeting_id: str = None,
-    speaker_id: str = None,
-    timestamp: str = None
+    meeting_id: str = Form(None),
+    speaker_id: str = Form(None),
+    timestamp: str = Form(None)
 ):
     """Transcribe audio file to text"""
     try:
@@ -158,7 +220,7 @@ async def transcribe_audio(
         
         # Start transcription in background
         background_tasks.add_task(
-            transcription_service.transcribe_file,
+            process_transcription,
             temp_path,
             meeting_id,
             speaker_id,
@@ -266,13 +328,20 @@ async def finalize_meeting(request: dict):
     """Finalize meeting and trigger processing"""
     try:
         meeting_id = request.get("meeting_id")
+        audio_files_count = request.get("audio_files_count", 1)
         
         await meeting_manager.update_meeting_status(meeting_id, "processing")
+        
+        # Set the total number of chunks to expect
+        await meeting_manager.set_total_chunks(meeting_id, audio_files_count)
+        
+        logger.info(f"Meeting finalized: {meeting_id}, expecting {audio_files_count} audio chunks")
         
         return {
             "meeting_id": meeting_id,
             "status": "processing",
-            "timestamp": datetime.now()
+            "timestamp": datetime.now(),
+            "expected_chunks": audio_files_count
         }
         
     except Exception as e:

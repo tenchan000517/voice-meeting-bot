@@ -2,7 +2,7 @@
 
 **プロジェクト名**: Voice Meeting Recorder Bot (議事録くん)  
 **開発期間**: 2025年6月23日  
-**ステータス**: Phase 3 完了 (基本実装完了、バグ修正中)
+**ステータス**: Phase 4 完了 (システム統合完了、WSL2問題解決)
 
 ## 📋 プロジェクト概要
 
@@ -43,7 +43,7 @@ Discord Server ←→ Node.js Bot ←→ Python API ←→ Ollama AI
   - SQLite データベース
 - [x] **Discord Bot Token設定** & 権限設定
 
-### Phase 4: システム統合 🔄 部分完了
+### Phase 4: システム統合 ✅ 完了
 - [x] **Python APIサーバー起動** ✅
   - Whisper base モデル読み込み成功
   - Ollama 接続確認済み
@@ -51,9 +51,13 @@ Discord Server ←→ Node.js Bot ←→ Python API ←→ Ollama AI
 - [x] **Discord Bot起動** ✅
   - オンライン状態確認済み
   - スラッシュコマンド登録完了
-- [⚠️] **音声録音機能** - バグ修正中
-  - Guild/Members 取得エラー
-  - Python API 接続エラー
+- [x] **WSL2ネットワーク問題解決** ✅
+  - WSL2内のゾンビプロセス (python3 -m http.server 8000) 特定・削除
+  - ポート衝突問題解決
+  - Windows/WSL2環境分離問題の解決
+- [x] **開発ルール策定** ✅
+  - CLAUDE.md 作成 (AI Assistant用ガイドライン)
+  - WSL2使用制限事項明文化
 
 ## 🛠️ 技術スタック
 
@@ -107,7 +111,9 @@ voice-meeting-bot/
 │
 ├── docker-compose.yml          # Docker設定 ✅
 ├── README.md                  # セットアップガイド ✅
-└── PROGRESS_REPORT.md         # 本報告書 ✅
+├── PROGRESS_REPORT.md         # 本報告書 ✅
+├── CLAUDE.md                  # AI Assistant ガイドライン ✅
+└── DEVELOPMENT_STATUS.md      # 詳細開発状況 ✅
 ```
 
 ## 🎯 動作確認済み機能
@@ -128,37 +134,44 @@ voice-meeting-bot/
    - Ollama Gemma2:2b 利用可能 ✅
    - 日本語要約生成テスト済み ✅
 
-### ⚠️ 修正中の問題
+### ✅ 解決済みの問題
 
-1. **音声録音エラー**
-   ```
-   Cannot read properties of undefined (reading 'members')
-   ```
-   - **原因**: Guild オブジェクト取得エラー
-   - **修正方針**: `this.client.guilds.cache.get()` 使用
-
-2. **API接続エラー**
+1. **WSL2ネットワーク問題** ✅ 解決
    ```
    ECONNRESET: socket hang up
    ```
-   - **原因**: `/meeting/start` エンドポイント未実装
-   - **修正方針**: API エンドポイント追加完了
+   - **原因**: WSL2内でゾンビプロセス `python3 -m http.server 8000` (PID: 334709)がポート8000を占有
+   - **解決**: プロセス特定・削除、Windows側でのPython API起動に変更
+
+2. **環境分離問題** ✅ 解決
+   - **原因**: Discord Bot (Windows側) ↔ Python API (WSL2内) の通信不可
+   - **解決**: 両サービスをWindows側に統一
+
+3. **開発プロセス改善** ✅ 完了
+   - **CLAUDE.md 作成**: AI Assistant用の制限事項とガイドライン策定
+   - **ポート管理ルール**: WSL2での一時的HTTPサーバー起動禁止
+
+### ⚠️ 次回対応予定
+
+1. **音声録音機能の最終テスト**
+   - Windows環境でのエンドツーエンドテスト
+   - Discord Bot ↔ Python API 通信確認
 
 ## 🚀 次のステップ
 
-### Phase 5: バグ修正 (進行中)
-- [ ] Guild/Members 取得問題修正
-- [ ] Python API エンドポイント最終調整
-- [ ] 音声録音テスト実行
+### Phase 5: 最終テスト (次回実行)
+- [ ] Windows環境でPython API起動
+- [ ] Discord Bot ↔ Python API 通信テスト
+- [ ] 音声録音機能エンドツーエンドテスト
 
-### Phase 6: 機能テスト
-- [ ] エンドツーエンド録音テスト
+### Phase 6: 機能検証
 - [ ] 文字起こし精度確認
 - [ ] 議事録生成品質確認
+- [ ] パフォーマンステスト
 
 ### Phase 7: 本番対応
 - [ ] エラーハンドリング強化
-- [ ] パフォーマンス最適化
+- [ ] ログ・監視機能追加
 - [ ] デプロイ設定
 
 ## 📊 開発統計
@@ -220,5 +233,5 @@ npm start
 ---
 
 **開発者**: tenchan000517  
-**最終更新**: 2025年6月23日 14:40 JST  
-**ステータス**: 基本実装完了、バグ修正フェーズ
+**最終更新**: 2025年6月23日 10:55 JST  
+**ステータス**: Phase 4完了 (WSL2問題解決、Windows環境統一準備完了)

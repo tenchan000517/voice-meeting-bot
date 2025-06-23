@@ -386,6 +386,218 @@ class MeetingManager:
         finally:
             db.close()
     
+    async def get_meeting_transcript_chunks(self, meeting_id: str, chunk_duration_minutes: int = 30) -> List[Dict]:
+        """Get meeting transcript in chunks for hierarchical summarization"""
+        try:
+            db = self.db_session()
+            
+            # Get all transcripts for the meeting
+            transcripts = db.query(Transcript).filter(
+                Transcript.meeting_id == meeting_id
+            ).order_by(Transcript.start_time).all()
+            
+            if not transcripts:
+                return []
+            
+            # Group transcripts into chunks based on time
+            chunks = []
+            current_chunk = {
+                'start_time': transcripts[0].start_time,
+                'texts': [],
+                'speakers': set()
+            }
+            
+            chunk_start = transcripts[0].start_time
+            
+            for transcript in transcripts:
+                # Check if this transcript belongs to current chunk
+                time_diff = (transcript.start_time - chunk_start).total_seconds() / 60
+                
+                if time_diff >= chunk_duration_minutes:
+                    # Save current chunk
+                    chunks.append({
+                        'text': '\n'.join(current_chunk['texts']),
+                        'speakers': list(current_chunk['speakers']),
+                        'start_time': current_chunk['start_time'],
+                        'duration_minutes': chunk_duration_minutes
+                    })
+                    
+                    # Start new chunk
+                    chunk_start = transcript.start_time
+                    current_chunk = {
+                        'start_time': transcript.start_time,
+                        'texts': [],
+                        'speakers': set()
+                    }
+                
+                # Add to current chunk
+                current_chunk['texts'].append(f"[{transcript.speaker_name}]: {transcript.text}")
+                current_chunk['speakers'].add(transcript.speaker_name)
+            
+            # Add final chunk
+            if current_chunk['texts']:
+                chunks.append({
+                    'text': '\n'.join(current_chunk['texts']),
+                    'speakers': list(current_chunk['speakers']),
+                    'start_time': current_chunk['start_time'],
+                    'duration_minutes': chunk_duration_minutes
+                })
+            
+            logger.info(f"Split meeting {meeting_id} into {len(chunks)} chunks")
+            return chunks
+            
+        except Exception as e:
+            logger.error(f"Failed to get transcript chunks: {e}")
+            return []
+        finally:
+            db.close()
+    
+    async def increment_completed_chunks(self, meeting_id: str):
+        """Increment the count of completed transcription chunks"""
+        try:
+            db = self.db_session()
+            status = db.query(ProcessingStatus).filter(
+                ProcessingStatus.meeting_id == meeting_id
+            ).first()
+            
+            if status:
+                status.completed_chunks += 1
+                status.updated_at = datetime.utcnow()
+                
+                # Update progress
+                if status.total_chunks > 0:
+                    status.transcription_progress = status.completed_chunks / status.total_chunks
+                
+                db.commit()
+                logger.info(f"Updated chunk progress for {meeting_id}: {status.completed_chunks}/{status.total_chunks}")
+            
+        except Exception as e:
+            logger.error(f"Failed to increment completed chunks: {e}")
+            db.rollback()
+        finally:
+            db.close()
+    
+    async def set_total_chunks(self, meeting_id: str, total_chunks: int):
+        """Set the total number of chunks for a meeting"""
+        try:
+            db = self.db_session()
+            status = db.query(ProcessingStatus).filter(
+                ProcessingStatus.meeting_id == meeting_id
+            ).first()
+            
+            if not status:
+                status = ProcessingStatus(meeting_id=meeting_id)
+                db.add(status)
+            
+            status.total_chunks = total_chunks
+            status.updated_at = datetime.utcnow()
+            db.commit()
+            
+            logger.info(f"Set total chunks for {meeting_id}: {total_chunks}")
+            
+        except Exception as e:
+            logger.error(f"Failed to set total chunks: {e}")
+            db.rollback()
+        finally:
+            db.close()
+    
+    async def check_all_chunks_completed(self, meeting_id: str) -> bool:
+        """Check if all transcription chunks are completed"""
+        try:
+            db = self.db_session()
+            status = db.query(ProcessingStatus).filter(
+                ProcessingStatus.meeting_id == meeting_id
+            ).first()
+            
+            if not status:
+                return False
+            
+            # Check if all chunks are completed
+            is_complete = (status.total_chunks > 0 and 
+                          status.completed_chunks >= status.total_chunks and
+                          status.transcription_status != 'failed')
+            
+            if is_complete:
+                status.transcription_status = 'completed'
+                status.processing_end = datetime.utcnow()
+                db.commit()
+            
+            return is_complete
+            
+        except Exception as e:
+            logger.error(f"Failed to check chunk completion: {e}")
+            return False
+        finally:
+            db.close()
+    
+    async def trigger_hierarchical_summarization(self, meeting_id: str) -> bool:
+        """Trigger hierarchical summarization for a completed meeting"""
+        try:
+            # Get meeting info
+            db = self.db_session()
+            meeting = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
+            
+            if not meeting:
+                logger.error(f"Meeting not found: {meeting_id}")
+                return False
+            
+            # Parse participants
+            participants = json.loads(meeting.participants) if meeting.participants else []
+            
+            # Get transcript chunks
+            chunks = await self.get_meeting_transcript_chunks(meeting_id)
+            
+            if not chunks:
+                logger.warning(f"No transcript chunks found for meeting: {meeting_id}")
+                # Update status to indicate no transcripts
+                await self.update_processing_status(
+                    meeting_id,
+                    summarization_status="no_transcripts"
+                )
+                return False
+            
+            # Import summarization service
+            from .summarization import SummarizationService
+            summarization_service = SummarizationService()
+            
+            # Create hierarchical summary
+            summary_data = await summarization_service.create_hierarchical_summary(
+                meeting_id=meeting_id,
+                chunk_transcripts=chunks,
+                participants=participants,
+                total_duration=meeting.duration_minutes or 0
+            )
+            
+            # Save summary to file
+            file_path = await summarization_service.save_summary(meeting_id, summary_data)
+            
+            # Save to database
+            await self.save_summary(
+                meeting_id=meeting_id,
+                summary_content=summary_data['full_summary'],
+                summary_type='hierarchical',
+                file_path=file_path,
+                generated_by='ollama_hierarchical'
+            )
+            
+            # Update meeting status
+            await self.update_meeting_status(meeting_id, 'completed')
+            await self.update_processing_status(meeting_id, summarization_status='completed')
+            
+            logger.info(f"Hierarchical summarization completed for meeting: {meeting_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to trigger hierarchical summarization: {e}")
+            await self.update_processing_status(
+                meeting_id, 
+                summarization_status='failed',
+                error_message=str(e)
+            )
+            return False
+        finally:
+            db.close()
+    
     async def cleanup_old_meetings(self, days: int = 30) -> int:
         """Clean up old meetings and their data"""
         try:
