@@ -71,25 +71,41 @@ class TranscriptionService:
     async def optimize_audio(self, input_path: str) -> str:
         """Optimize audio for Whisper processing"""
         try:
-            # Load audio with pydub
-            audio = AudioSegment.from_file(input_path)
-            
-            # Convert to mono, 16kHz (optimal for Whisper)
-            audio = audio.set_channels(1)
-            audio = audio.set_frame_rate(16000)
-            
-            # Generate optimized filename
             base_name = os.path.splitext(os.path.basename(input_path))[0]
             optimized_path = os.path.join(self.temp_dir, f"{base_name}_optimized.wav")
             
-            # Export optimized audio
+            # Check if input is a raw PCM file (from Discord)
+            if input_path.lower().endswith('.pcm'):
+                logger.info(f"Processing raw PCM file: {input_path}")
+                
+                # Load raw PCM data (Discord format: 48kHz, 16-bit, mono)
+                audio = AudioSegment.from_raw(
+                    input_path,
+                    sample_width=2,  # 16-bit = 2 bytes
+                    frame_rate=48000,  # Discord voice rate
+                    channels=1  # mono
+                )
+                
+                logger.info(f"Loaded PCM: {len(audio)}ms, {audio.frame_rate}Hz, {audio.channels}ch")
+                
+            else:
+                # Load regular audio file
+                audio = AudioSegment.from_file(input_path)
+                logger.info(f"Loaded audio: {len(audio)}ms, {audio.frame_rate}Hz, {audio.channels}ch")
+            
+            # Convert to optimal format for Whisper (16kHz, mono)
+            audio = audio.set_channels(1)
+            audio = audio.set_frame_rate(16000)
+            
+            # Export optimized audio as WAV
             audio.export(optimized_path, format="wav")
             
-            logger.info(f"Audio optimized: {optimized_path}")
+            logger.info(f"Audio optimized: {optimized_path} ({len(audio)}ms, 16kHz)")
             return optimized_path
             
         except Exception as e:
             logger.error(f"Audio optimization failed: {e}")
+            logger.error(f"Input file: {input_path}, size: {os.path.getsize(input_path) if os.path.exists(input_path) else 'not found'} bytes")
             # Return original path if optimization fails
             return input_path
     
