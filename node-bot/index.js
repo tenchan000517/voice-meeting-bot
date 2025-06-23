@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 // Import our modules
 import { VoiceRecorder } from './src/recorder.js';
 import { CommandHandler } from './src/commands.js';
+import { VoiceManager } from './src/voice-manager.js';
 
 // Load environment variables
 dotenv.config();
@@ -48,9 +49,10 @@ const client = new Client({
   ]
 });
 
-// Initialize recorder and command handler
+// Initialize recorder, voice manager, and command handler
 const recorder = new VoiceRecorder(client, logger);
-const commandHandler = new CommandHandler(client, recorder, logger);
+const voiceManager = new VoiceManager(client, logger);
+const commandHandler = new CommandHandler(client, recorder, logger, voiceManager);
 
 // Bot ready event
 client.once('ready', async () => {
@@ -74,6 +76,9 @@ client.on('interactionCreate', async (interaction) => {
     switch (interaction.commandName) {
       case 'record':
         await commandHandler.handleRecordCommand(interaction);
+        break;
+      case 'voice':
+        await commandHandler.handleVoiceCommand(interaction);
         break;
       default:
         await interaction.reply({
@@ -160,6 +165,7 @@ process.on('SIGINT', async () => {
   
   try {
     await recorder.cleanup();
+    await voiceManager.cleanup();
     client.destroy();
     process.exit(0);
   } catch (error) {
@@ -173,6 +179,7 @@ process.on('SIGTERM', async () => {
   
   try {
     await recorder.cleanup();
+    await voiceManager.cleanup();
     client.destroy();
     process.exit(0);
   } catch (error) {

@@ -49,13 +49,45 @@ export const commands = [
             .setMaxValue(6)
         )
     )
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  
+  new SlashCommandBuilder()
+    .setName('voice')
+    .setDescription('Voice channel monitoring commands')
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName('join')
+        .setDescription('Join voice channel in mute mode')
+    )
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName('leave')
+        .setDescription('Leave voice channel')
+    )
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName('status')
+        .setDescription('Check voice channel status')
+    )
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName('autoleave')
+        .setDescription('Toggle auto-leave when no humans present')
+        .addBooleanOption(option =>
+          option
+            .setName('enabled')
+            .setDescription('Enable or disable auto-leave')
+            .setRequired(true)
+        )
+    )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 ];
 
 export class CommandHandler {
-  constructor(client, recorder, logger) {
+  constructor(client, recorder, logger, voiceManager = null) {
     this.client = client;
     this.recorder = recorder;
+    this.voiceManager = voiceManager;
     this.logger = logger;
     this.adminUsers = process.env.ADMIN_USER_IDS?.split(',') || [];
   }
@@ -332,6 +364,227 @@ export class CommandHandler {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const random = Math.random().toString(36).substring(2, 8);
     return `meeting-${timestamp}-${random}`;
+  }
+
+  async handleVoiceCommand(interaction) {
+    try {
+      const subcommand = interaction.options.getSubcommand();
+
+      // Check if voice manager is available
+      if (!this.voiceManager) {
+        return await interaction.reply({
+          content: '❌ 音声管理機能が利用できません。',
+          ephemeral: true
+        });
+      }
+
+      // Check permissions
+      if (!this._hasPermission(interaction)) {
+        return await interaction.reply({
+          content: '❌ この機能を使用する権限がありません。',
+          ephemeral: true
+        });
+      }
+
+      switch (subcommand) {
+        case 'join':
+          return await this._handleVoiceJoin(interaction);
+        case 'leave':
+          return await this._handleVoiceLeave(interaction);
+        case 'status':
+          return await this._handleVoiceStatus(interaction);
+        case 'autoleave':
+          return await this._handleAutoLeave(interaction);
+        default:
+          return await interaction.reply({
+            content: '❌ 不明なコマンドです。',
+            ephemeral: true
+          });
+      }
+
+    } catch (error) {
+      this.logger.error('Voice command handling error:', error);
+      
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: '❌ コマンドの実行中にエラーが発生しました。',
+          ephemeral: true
+        });
+      }
+    }
+  }
+
+  async _handleVoiceJoin(interaction) {
+    try {
+      // Check if user is in a voice channel
+      const voiceChannel = interaction.member.voice.channel;
+      if (!voiceChannel) {
+        return await interaction.reply({
+          content: '❌ ボイスチャンネルに参加してからコマンドを実行してください。',
+          ephemeral: true
+        });
+      }
+
+      // Check bot permissions
+      const permissions = voiceChannel.permissionsFor(interaction.client.user);
+      if (!permissions.has(['Connect', 'Speak'])) {
+        return await interaction.reply({
+          content: '❌ ボットにボイスチャンネルへの接続権限がありません。',
+          ephemeral: true
+        });
+      }
+
+      await interaction.deferReply();
+
+      // Join voice channel
+      const result = await this.voiceManager.joinChannel(voiceChannel);
+
+      const embed = new EmbedBuilder()
+        .setColor(0x00ff00)
+        .setTitle('🔊 ボイスチャンネル参加')
+        .setDescription(`ボイスチャンネル「${voiceChannel.name}」に参加しました`)
+        .addFields(
+          { name: 'チャンネル', value: result.channelName, inline: true },
+          { name: '参加時刻', value: result.joinTime.toLocaleString('ja-JP'), inline: true },
+          { name: '自動退出', value: 'ユーザーがいなくなったら自動退出します', inline: false }
+        )
+        .setTimestamp()
+        .setFooter({ text: 'Voice Monitor Bot' });
+
+      await interaction.editReply({ embeds: [embed] });
+
+    } catch (error) {
+      this.logger.error('Voice join error:', error);
+      
+      const errorEmbed = new EmbedBuilder()
+        .setColor(0xff0000)
+        .setTitle('❌ 参加エラー')
+        .setDescription(error.message || 'ボイスチャンネルへの参加に失敗しました')
+        .setTimestamp();
+
+      if (interaction.deferred) {
+        await interaction.editReply({ embeds: [errorEmbed] });
+      } else {
+        await interaction.reply({ embeds: [errorEmbed], ephemeral: true });
+      }
+    }
+  }
+
+  async _handleVoiceLeave(interaction) {
+    try {
+      const voiceChannel = interaction.member.voice.channel;
+      if (!voiceChannel) {
+        return await interaction.reply({
+          content: '❌ ボイスチャンネルに参加してからコマンドを実行してください。',
+          ephemeral: true
+        });
+      }
+
+      await interaction.deferReply();
+
+      // Leave voice channel
+      const result = await this.voiceManager.leaveChannel(voiceChannel.id);
+
+      const embed = new EmbedBuilder()
+        .setColor(0xff0000)
+        .setTitle('👋 ボイスチャンネル退出')
+        .setDescription(`ボイスチャンネル「${result.channelName}」から退出しました`)
+        .addFields(
+          { name: 'チャンネル', value: result.channelName, inline: true },
+          { name: '滞在時間', value: `${result.duration}分`, inline: true }
+        )
+        .setTimestamp()
+        .setFooter({ text: 'Voice Monitor Bot' });
+
+      await interaction.editReply({ embeds: [embed] });
+
+    } catch (error) {
+      this.logger.error('Voice leave error:', error);
+      
+      const errorEmbed = new EmbedBuilder()
+        .setColor(0xff0000)
+        .setTitle('❌ 退出エラー')
+        .setDescription(error.message || 'ボイスチャンネルからの退出に失敗しました')
+        .setTimestamp();
+
+      if (interaction.deferred) {
+        await interaction.editReply({ embeds: [errorEmbed] });
+      } else {
+        await interaction.reply({ embeds: [errorEmbed], ephemeral: true });
+      }
+    }
+  }
+
+  async _handleVoiceStatus(interaction) {
+    try {
+      const connections = this.voiceManager.getActiveConnections();
+
+      if (connections.length === 0) {
+        const embed = new EmbedBuilder()
+          .setColor(0x666666)
+          .setTitle('📊 ボイス接続状況')
+          .setDescription('現在、ボイスチャンネルに接続していません')
+          .setTimestamp();
+
+        return await interaction.reply({ embeds: [embed] });
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0x0099ff)
+        .setTitle('📊 ボイス接続状況')
+        .setDescription(`${connections.length}個のボイスチャンネルに接続中`)
+        .setTimestamp();
+
+      connections.forEach((connection, index) => {
+        const channel = interaction.client.channels.cache.get(connection.channelId);
+        const channelName = channel ? channel.name : '不明なチャンネル';
+        
+        embed.addFields({
+          name: `🔊 接続 ${index + 1}`,
+          value: `**チャンネル:** ${channelName}\n**参加時刻:** ${connection.joinTime.toLocaleString('ja-JP')}\n**滞在時間:** ${connection.duration}分`,
+          inline: false
+        });
+      });
+
+      await interaction.reply({ embeds: [embed] });
+
+    } catch (error) {
+      this.logger.error('Voice status error:', error);
+      await interaction.reply({
+        content: '❌ 状況確認中にエラーが発生しました。',
+        ephemeral: true
+      });
+    }
+  }
+
+  async _handleAutoLeave(interaction) {
+    try {
+      const enabled = interaction.options.getBoolean('enabled');
+      
+      this.voiceManager.setAutoLeave(enabled);
+
+      const embed = new EmbedBuilder()
+        .setColor(enabled ? 0x00ff00 : 0xff9900)
+        .setTitle('⚙️ 自動退出設定')
+        .setDescription(`自動退出機能を${enabled ? '有効' : '無効'}にしました`)
+        .addFields({
+          name: '設定内容',
+          value: enabled 
+            ? 'ボイスチャンネルにユーザーがいなくなったら自動で退出します'
+            : '自動退出は無効です。手動で退出してください',
+          inline: false
+        })
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed] });
+
+    } catch (error) {
+      this.logger.error('Auto-leave setting error:', error);
+      await interaction.reply({
+        content: '❌ 設定変更中にエラーが発生しました。',
+        ephemeral: true
+      });
+    }
   }
 
   async registerCommands(guildId = null) {
