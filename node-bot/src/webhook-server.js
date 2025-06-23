@@ -1,4 +1,5 @@
 import express from 'express';
+import path from 'path';
 import logger from './logger.js';
 
 class WebhookServer {
@@ -11,9 +12,28 @@ class WebhookServer {
         // Middleware
         this.app.use(express.json());
         
+        // Static file serving for audio files
+        this.app.use('/audio', express.static('/tmp/voice-meeting-bot/temp'));
+        
         // Health check endpoint
         this.app.get('/health', (req, res) => {
             res.json({ status: 'ok', timestamp: new Date().toISOString() });
+        });
+        
+        // Individual audio file download endpoint
+        this.app.get('/audio/:filename', (req, res) => {
+            try {
+                const filepath = path.join('/tmp/voice-meeting-bot/temp', req.params.filename);
+                res.download(filepath, (err) => {
+                    if (err) {
+                        logger.error(`Error downloading audio file ${req.params.filename}:`, err);
+                        res.status(404).json({ error: 'Audio file not found' });
+                    }
+                });
+            } catch (error) {
+                logger.error(`Error serving audio file ${req.params.filename}:`, error);
+                res.status(500).json({ error: 'Internal server error' });
+            }
         });
         
         // Webhook endpoint for meeting completion

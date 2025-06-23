@@ -91,3 +91,80 @@
 - **最大ファイルサイズ**: 5MB (Python API), 10MB (Discord Bot)
 - **バックアップ数**: 3個
 - **自動削除**: 7日以上経過したファイル
+
+## 🚨 EC2緊急復旧ガイド
+
+### EC2インスタンス停止時の対処法
+
+**症状:**
+- SSH接続不可
+- Whisperモデルダウンロード中のプロセス強制終了
+- 重いパッケージインストール中の接続切断
+
+**原因:**
+- メモリ不足によるプロセス強制終了
+- 大容量ダウンロード（100MB以上）でのリソース枯渇
+
+**復旧手順:**
+
+1. **AWSコンソールでインスタンス確認**
+   ```
+   インスタンスID: i-0e8fd60d7508ac84b
+   状態確認: 「停止」→「開始」をクリック
+   ⚠️ 「終了」は絶対回避（データ消失）
+   ```
+
+2. **新しいIPアドレス取得**
+   ```
+   EC2起動後→新しいパブリックIP確認
+   ~/.ssh/config 更新必須
+   ```
+
+3. **SSH設定更新**
+   ```bash
+   # C:\Users\tench\.ssh\config
+   Host find-to-do
+       HostName [新しいIP]  # 要更新
+       User ec2-user
+       IdentityFile C:\Users\tench\.ssh\find-to-do-key2.pem
+       ServerAliveInterval 60
+   ```
+
+### zeroone_support Bot緊急復旧
+
+**最優先復旧対象:** zeroone_supportは稼働中サービス
+
+```bash
+# 1. SSH接続確認
+ssh find-to-do
+
+# 2. tmuxセッション復旧
+tmux list-sessions
+tmux attach-session -t dj-eyes
+
+# 3. セッションが無い場合
+tmux new-session -d -s dj-eyes
+cd ~/zeroone_support
+source venv/bin/activate
+python3 main.py
+
+# 4. Ctrl+B, D でデタッチ（セッション維持）
+```
+
+### Whisperインストール安全ガイド
+
+**危険なモデル:**
+- `base` (139MB) → EC2停止リスク
+- `small` (244MB) → 確実にクラッシュ
+- `medium`, `large` → 絶対禁止
+
+**安全なモデル:**
+```bash
+# .env設定必須
+echo "WHISPER_MODEL=tiny" >> .env  # 72MB - 安全
+```
+
+**インストール時の注意:**
+- 100MB以上のダウンロードは危険
+- CPU版PyTorchのみ使用
+- `--no-cache-dir` オプション必須
