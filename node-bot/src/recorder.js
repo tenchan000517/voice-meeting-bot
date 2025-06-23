@@ -191,7 +191,18 @@ export class VoiceRecorder {
 
       // Get user info
       const user = await this.client.users.fetch(userId);
+      
+      // Debug logging
+      this.logger.info(`Recording guild ID: ${recording.guildId}`);
+      this.logger.info(`Available guilds: ${Array.from(this.client.guilds.cache.keys()).join(', ')}`);
+      
       const guild = this.client.guilds.cache.get(recording.guildId);
+      
+      if (!guild) {
+        this.logger.error(`Guild not found: ${recording.guildId}, available: ${Array.from(this.client.guilds.cache.keys())}`);
+        throw new Error(`Guild not found: ${recording.guildId}`);
+      }
+      
       const member = await guild.members.fetch(userId);
 
       this.logger.info(`Starting recording for user: ${user.tag} (${userId})`);
@@ -354,8 +365,12 @@ export class VoiceRecorder {
 
   async _sendChunkToAPI(chunkData) {
     try {
+      this.logger.info(`Sending ${chunkData.audioFiles.length} audio files for chunk ${chunkData.chunkIndex}`);
+      
       for (const audioFile of chunkData.audioFiles) {
         if (await this._fileExists(audioFile.filePath)) {
+          this.logger.info(`Processing audio file: ${audioFile.filePath} (size: ${(await fs.stat(audioFile.filePath)).size} bytes)`);
+          
           const formData = new FormData();
           const fileBuffer = await fs.readFile(audioFile.filePath);
           const blob = new Blob([fileBuffer], { type: 'audio/pcm' });
@@ -365,24 +380,64 @@ export class VoiceRecorder {
           formData.append('speaker_id', audioFile.userId);
           formData.append('timestamp', chunkData.timestamp.toISOString());
 
-          await axios.post(`${this.apiUrl}/transcribe`, formData, {
+          this.logger.info(`Sending transcription request to ${this.apiUrl}/transcribe`);
+
+          const response = await axios.post(`${this.apiUrl}/transcribe`, formData, {
             headers: {
               'Content-Type': 'multipart/form-data',
             },
             timeout: 30000
           });
 
-          this.logger.info(`Sent audio chunk to API: ${audioFile.filePath}`);
+          this.logger.info(`Successfully sent audio chunk to API: ${audioFile.filePath}, response: ${response.status}`);
+        } else {
+          this.logger.warning(`Audio file not found: ${audioFile.filePath}`);
         }
       }
 
     } catch (error) {
       this.logger.error('Failed to send chunk to API:', error);
+      this.logger.error('API Error details:', error.response?.data || error.message);
+      this.logger.error('API URL:', this.apiUrl);
     }
   }
 
   async _triggerTranscription(recording) {
     try {
+      this.logger.info(`Starting transcription trigger for meeting: ${recording.meetingId}`);
+      this.logger.info(`Recording participants: ${recording.participants.size}, audio files: ${recording.audioFiles.length}`);
+      
+      // First, send any remaining audio files to API
+      const finalAudioFiles = [];
+      for (const [userId, userRecording] of recording.participants) {
+        if (userRecording.filePath && await this._fileExists(userRecording.filePath)) {
+          finalAudioFiles.push({
+            userId,
+            username: userRecording.username,
+            filePath: userRecording.filePath,
+            duration: userRecording.duration
+          });
+          this.logger.info(`Found audio file for final transcription: ${userRecording.filePath}`);
+        }
+      }
+      
+      // Send final audio files to transcription API
+      if (finalAudioFiles.length > 0) {
+        this.logger.info(`Sending ${finalAudioFiles.length} audio files for transcription`);
+        const finalChunkData = {
+          meetingId: recording.meetingId,
+          chunkIndex: 'final',
+          participants: Array.from(recording.participants.keys()),
+          timestamp: new Date(),
+          audioFiles: finalAudioFiles
+        };
+        
+        await this._sendChunkToAPI(finalChunkData);
+        this.logger.info(`Sent final audio chunks for transcription`);
+      } else {
+        this.logger.warning(`No audio files found for transcription: ${recording.meetingId}`);
+      }
+
       const transcriptionData = {
         meeting_id: recording.meetingId,
         participants: Array.from(recording.participants.values()).map(p => ({
@@ -392,17 +447,20 @@ export class VoiceRecorder {
           duration: p.duration
         })),
         duration_minutes: Math.floor((recording.endTime - recording.startTime) / 1000 / 60),
-        audio_files_count: recording.audioFiles.length
+        audio_files_count: finalAudioFiles.length
       };
+
+      this.logger.info(`Finalizing meeting with data: ${JSON.stringify(transcriptionData)}`);
 
       await axios.post(`${this.apiUrl}/meeting/finalize`, transcriptionData, {
         timeout: 10000
       });
 
-      this.logger.info(`Transcription triggered for meeting: ${recording.meetingId}`);
+      this.logger.info(`Transcription triggered successfully for meeting: ${recording.meetingId}`);
 
     } catch (error) {
       this.logger.error('Failed to trigger transcription:', error);
+      this.logger.error('Error details:', error.response?.data || error.message);
     }
   }
 
