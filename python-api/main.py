@@ -98,17 +98,19 @@ async def send_webhook_notification(meeting_id: str, webhook_data: dict):
         logger.error(f"Webhook failed for meeting {meeting_id}: {e} - falling back to polling")
 
 async def send_chunk_summary_to_discord(meeting_id: str, chunk_data: dict):
-    """Send chunk summary to Discord via webhook"""
+    """Send lightweight chunk summary notification to Discord via webhook"""
     try:
-        formatted_summary = summarization_service.format_chunk_summary_for_discord(chunk_data)
-        
+        # 軽量化：重いコンテンツをwebhookに含めず、ダウンロードリンクのみ送信
         webhook_data = {
             "meeting_id": meeting_id,
             "event": "chunk_summary",
             "chunk_index": chunk_data["chunk_index"],
             "time_range": chunk_data["time_range"],
-            "summary_content": formatted_summary,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "download_links": {
+                "chunk_summary": f"/download/meeting/{meeting_id}/chunk/{chunk_data['chunk_index']}/summary",
+                "chunk_transcript": f"/download/meeting/{meeting_id}/chunk/{chunk_data['chunk_index']}/transcript"
+            }
         }
         
         await send_webhook_notification(meeting_id, webhook_data)
@@ -116,10 +118,10 @@ async def send_chunk_summary_to_discord(meeting_id: str, chunk_data: dict):
         # Mark as sent in database
         await meeting_manager.mark_chunk_summary_sent(meeting_id, chunk_data["chunk_index"])
         
-        logger.info(f"Sent chunk summary to Discord for chunk {chunk_data['chunk_index']}")
+        logger.info(f"Sent lightweight chunk summary notification to Discord for chunk {chunk_data['chunk_index']}")
         
     except Exception as e:
-        logger.error(f"Failed to send chunk summary to Discord: {e}")
+        logger.error(f"Failed to send chunk summary notification to Discord: {e}")
 
 async def process_transcription(
     file_path: str,
@@ -290,12 +292,17 @@ async def generate_final_integrated_summary(meeting_id: str):
         await meeting_manager.update_meeting_status(meeting_id, 'completed')
         await meeting_manager.update_processing_status(meeting_id, summarization_status='completed')
         
-        # Send final summary to Discord
+        # Send lightweight final summary notification to Discord
         final_summary_webhook = {
             "meeting_id": meeting_id,
             "event": "final_summary",
-            "summary_content": f"# 🎙️ 最終議事録\n\n{integrated_summary_data['full_summary']}",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "download_links": {
+                "final_summary": f"/download/meeting/{meeting_id}/final-summary",
+                "summary": f"/download/meeting/{meeting_id}/summary",
+                "transcript": f"/download/meeting/{meeting_id}/transcript",
+                "chunks": f"/download/meeting/{meeting_id}/chunks"
+            }
         }
         await send_webhook_notification(meeting_id, final_summary_webhook)
         
@@ -802,6 +809,154 @@ async def generate_chunk_summary_manually(meeting_id: str, chunk_index: int):
         
     except Exception as e:
         logger.error(f"Manual chunk summary generation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/download/meeting/{meeting_id}/chunk/{chunk_index}/summary")
+async def download_chunk_summary(meeting_id: str, chunk_index: int):
+    """Download formatted chunk summary as Markdown"""
+    try:
+        # Get chunk summary from database
+        chunk_summaries = await meeting_manager.get_all_chunk_summaries(meeting_id)
+        chunk_summary = None
+        
+        for chunk in chunk_summaries:
+            if chunk['chunk_index'] == chunk_index:
+                chunk_summary = chunk
+                break
+        
+        if not chunk_summary:
+            raise HTTPException(status_code=404, detail="Chunk summary not found")
+        
+        # Format chunk summary for download
+        formatted_summary = summarization_service.format_chunk_summary_for_discord(chunk_summary)
+        
+        return PlainTextResponse(
+            content=formatted_summary,
+            headers={
+                "Content-Disposition": f"attachment; filename=chunk_summary_{meeting_id}_{chunk_index}.md",
+                "Content-Type": "text/markdown"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Download chunk summary error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/download/meeting/{meeting_id}/chunk/{chunk_index}/transcript")
+async def download_chunk_transcript(meeting_id: str, chunk_index: int):
+    """Download chunk transcript as plain text"""
+    try:
+        # Get chunk summary from database (contains transcript)
+        chunk_summaries = await meeting_manager.get_all_chunk_summaries(meeting_id)
+        chunk_summary = None
+        
+        for chunk in chunk_summaries:
+            if chunk['chunk_index'] == chunk_index:
+                chunk_summary = chunk
+                break
+        
+        if not chunk_summary:
+            raise HTTPException(status_code=404, detail="Chunk transcript not found")
+        
+        # Format transcript for download
+        transcript_content = f"""# チャンク文字起こし
+
+**会議ID**: {meeting_id}
+**チャンク**: {chunk_index} ({chunk_summary['time_range']})
+**生成日時**: {chunk_summary['generated_at']}
+**参加者**: {', '.join(chunk_summary.get('participants', []))}
+
+## 文字起こし内容
+
+{chunk_summary['transcript_text']}
+"""
+        
+        return PlainTextResponse(
+            content=transcript_content,
+            headers={
+                "Content-Disposition": f"attachment; filename=chunk_transcript_{meeting_id}_{chunk_index}.txt",
+                "Content-Type": "text/plain"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Download chunk transcript error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/download/meeting/{meeting_id}/final-summary")
+async def download_final_summary(meeting_id: str):
+    """Download final integrated summary as Markdown"""
+    try:
+        # Check for integrated final summary first
+        summary_data = await meeting_manager.get_meeting_status(meeting_id)
+        if not summary_data:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        
+        # Try to find the latest summary file
+        output_dir = Path(__file__).parent / "output"
+        summary_files = list(output_dir.glob(f"meeting_{meeting_id}_*.md"))
+        
+        if not summary_files:
+            # Fallback: Generate summary from chunk summaries if available
+            chunk_summaries = await meeting_manager.get_all_chunk_summaries(meeting_id)
+            if chunk_summaries:
+                # Generate integrated summary from chunks
+                participants = summary_data.get('participants', [])
+                total_duration = summary_data.get('duration_minutes', 0)
+                
+                integrated_summary_data = await summarization_service.create_final_integrated_summary(
+                    meeting_id=meeting_id,
+                    chunk_summaries=chunk_summaries,
+                    total_duration=total_duration,
+                    all_participants=participants
+                )
+                
+                summary_content = integrated_summary_data['full_summary']
+            else:
+                raise HTTPException(status_code=404, detail="No summary available for this meeting")
+        else:
+            # Read the latest summary file
+            latest_file = max(summary_files, key=lambda p: p.stat().st_mtime)
+            async with aiofiles.open(latest_file, 'r', encoding='utf-8') as f:
+                summary_content = await f.read()
+        
+        return PlainTextResponse(
+            content=summary_content,
+            headers={
+                "Content-Disposition": f"attachment; filename=final_summary_{meeting_id}.md",
+                "Content-Type": "text/markdown"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Download final summary error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/download/meeting/{meeting_id}/all-chunks")
+async def download_all_chunk_summaries(meeting_id: str):
+    """Download all chunk summaries as a combined Markdown file"""
+    try:
+        chunk_summaries = await meeting_manager.get_all_chunk_summaries(meeting_id)
+        if not chunk_summaries:
+            raise HTTPException(status_code=404, detail="No chunk summaries found")
+        
+        # Combine all chunk summaries
+        combined_content = f"# 全チャンク要約一覧\n\n**会議ID**: {meeting_id}\n**生成日時**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        
+        for chunk in chunk_summaries:
+            formatted_chunk = summarization_service.format_chunk_summary_for_discord(chunk)
+            combined_content += f"{formatted_chunk}\n\n---\n\n"
+        
+        return PlainTextResponse(
+            content=combined_content,
+            headers={
+                "Content-Disposition": f"attachment; filename=all_chunks_{meeting_id}.md",
+                "Content-Type": "text/markdown"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Download all chunks error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

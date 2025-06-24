@@ -36,21 +36,32 @@ class WebhookServer {
             }
         });
         
-        // Webhook endpoint for meeting completion
+        // Webhook endpoint for meeting events (lightweight design)
         this.app.post('/webhook/meeting-completed', async (req, res) => {
             try {
-                const { meeting_id, event, timestamp, download_links } = req.body;
+                const { meeting_id, event, timestamp, download_links, chunk_index, time_range } = req.body;
                 
-                if (event !== 'meeting_completed') {
-                    return res.status(400).json({ error: 'Invalid event type' });
+                logger.info(`Webhook received - Event: ${event}, Meeting: ${meeting_id}`);
+                
+                switch (event) {
+                    case 'chunk_summary':
+                        await this.sendChunkSummaryNotification(meeting_id, chunk_index, time_range, download_links);
+                        break;
+                    
+                    case 'final_summary':
+                        await this.sendFinalSummaryNotification(meeting_id, download_links);
+                        break;
+                    
+                    case 'meeting_completed':
+                        await this.sendDownloadLinksMessage(meeting_id, download_links);
+                        break;
+                    
+                    default:
+                        logger.warn(`Unknown event type: ${event}`);
+                        return res.status(400).json({ error: 'Unknown event type' });
                 }
                 
-                logger.info(`Webhook received for meeting: ${meeting_id}`);
-                
-                // Send download links message to Discord
-                await this.sendDownloadLinksMessage(meeting_id, download_links);
-                
-                res.json({ status: 'success', processed_at: new Date().toISOString() });
+                res.json({ status: 'success', event: event, processed_at: new Date().toISOString() });
                 
             } catch (error) {
                 logger.error('Webhook processing error:', error);
@@ -123,6 +134,113 @@ class WebhookServer {
             
         } catch (error) {
             logger.error(`Failed to send download links message for meeting ${meetingId}:`, error);
+        }
+    }
+    
+    async sendChunkSummaryNotification(meetingId, chunkIndex, timeRange, downloadLinks) {
+        try {
+            const channelId = await this.getMeetingChannelId(meetingId);
+            if (!channelId) {
+                logger.warn(`No channel found for meeting ${meetingId}`);
+                return;
+            }
+            
+            const channel = this.bot.channels.cache.get(channelId);
+            if (!channel) {
+                logger.warn(`Channel ${channelId} not found in cache`);
+                return;
+            }
+            
+            const { EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } = await import('discord.js');
+            
+            const embed = new EmbedBuilder()
+                .setTitle(`📝 リアルタイム議事録 (${timeRange})`)
+                .setDescription(`**会議ID**: \`${meetingId}\`\n**時間帯**: ${timeRange}\n\n💡 **軽量設計**: 重い処理はサーバー側で完結し、ダウンロードリンクのみ提供`)
+                .setColor('#00bfff')
+                .setTimestamp()
+                .addFields(
+                    { name: '📋 チャンク要約', value: 'この時間帯の要約をダウンロード', inline: true },
+                    { name: '📄 文字起こし', value: 'この時間帯の転写をダウンロード', inline: true }
+                )
+                .setFooter({ text: `チャンク ${chunkIndex} - サーバー側処理完了` });
+            
+            const row = new ActionRowBuilder()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`download_chunk_summary_${meetingId}_${chunkIndex}`)
+                        .setLabel('📋 チャンク要約')
+                        .setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder()
+                        .setCustomId(`download_chunk_transcript_${meetingId}_${chunkIndex}`)
+                        .setLabel('📄 チャンク転写')
+                        .setStyle(ButtonStyle.Secondary)
+                );
+            
+            await channel.send({
+                embeds: [embed],
+                components: [row]
+            });
+            
+            logger.info(`Chunk summary notification sent for meeting ${meetingId}, chunk ${chunkIndex}`);
+            
+        } catch (error) {
+            logger.error(`Failed to send chunk summary notification for meeting ${meetingId}:`, error);
+        }
+    }
+    
+    async sendFinalSummaryNotification(meetingId, downloadLinks) {
+        try {
+            const channelId = await this.getMeetingChannelId(meetingId);
+            if (!channelId) {
+                logger.warn(`No channel found for meeting ${meetingId}`);
+                return;
+            }
+            
+            const channel = this.bot.channels.cache.get(channelId);
+            if (!channel) {
+                logger.warn(`Channel ${channelId} not found in cache`);
+                return;
+            }
+            
+            const { EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } = await import('discord.js');
+            
+            const embed = new EmbedBuilder()
+                .setTitle('🎙️ 最終議事録が完成しました')
+                .setDescription(`**会議ID**: \`${meetingId}\`\n\n✅ **全チャンク処理完了** - 統合議事録をサーバー側で生成\n💡 **軽量設計**: ダウンロードリンクのみ提供`)
+                .setColor('#00ff00')
+                .setTimestamp()
+                .addFields(
+                    { name: '📊 最終統合議事録', value: '全チャンクを統合した完全版', inline: true },
+                    { name: '📝 全チャンク要約', value: '時間帯別要約の一覧', inline: true },
+                    { name: '📄 完全転写', value: '全発言の転写データ', inline: true }
+                )
+                .setFooter({ text: '会議完了 - サーバー側処理完了' });
+            
+            const row = new ActionRowBuilder()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`download_final_summary_${meetingId}`)
+                        .setLabel('🎙️ 最終議事録')
+                        .setStyle(ButtonStyle.Success),
+                    new ButtonBuilder()
+                        .setCustomId(`download_all_chunks_${meetingId}`)
+                        .setLabel('📝 全チャンク要約')
+                        .setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder()
+                        .setCustomId(`download_transcript_${meetingId}`)
+                        .setLabel('📄 完全転写')
+                        .setStyle(ButtonStyle.Secondary)
+                );
+            
+            await channel.send({
+                embeds: [embed],
+                components: [row]
+            });
+            
+            logger.info(`Final summary notification sent for meeting ${meetingId}`);
+            
+        } catch (error) {
+            logger.error(`Failed to send final summary notification for meeting ${meetingId}:`, error);
         }
     }
     
