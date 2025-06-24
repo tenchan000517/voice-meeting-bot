@@ -1,0 +1,43 @@
+[Unit]
+Description=Voice Meeting Discord Bot
+After=network.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/home/ec2-user/voice-meeting-bot/node-bot
+ExecStart=/usr/bin/node index.js
+Restart=always
+RestartSec=10
+TimeoutStartSec=30
+TimeoutStopSec=15
+
+# Environment Variables
+Environment=NODE_ENV=production
+EnvironmentFile=/home/ec2-user/voice-meeting-bot/node-bot/.env
+
+# Process limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/ec2-user/voice-meeting-bot /tmp/voice-meeting-bot
+PrivateTmp=false
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=voice-meeting-discord
+
+# Health check (restart if unhealthy for 3 minutes)
+WatchdogSec=180
+
+[Install]
+WantedBy=multi-user.target

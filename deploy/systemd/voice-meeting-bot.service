@@ -1,0 +1,44 @@
+[Unit]
+Description=Voice Meeting Recorder Discord Bot (Lightweight)
+Documentation=https://github.com/voice-meeting-bot
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/home/ec2-user/voice-meeting-bot/node-bot
+ExecStart=/usr/bin/node index.js
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=voice-meeting-bot
+
+# 環境変数
+Environment=NODE_ENV=production
+Environment=WEBHOOK_PORT=3003
+Environment=AUDIO_PORT=3004
+Environment=LOG_LEVEL=info
+
+# セキュリティ設定
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/ec2-user/voice-meeting-bot/node-bot/logs
+ReadWritePaths=/home/ec2-user/voice-meeting-bot/node-bot/temp
+ReadWritePaths=/tmp/voice-meeting-bot
+
+# リソース制限
+MemoryLimit=512M
+CPUQuota=50%
+
+# プロセス管理
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+Alias=vmb.service
