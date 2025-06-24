@@ -97,6 +97,30 @@ async def send_webhook_notification(meeting_id: str, webhook_data: dict):
     except Exception as e:
         logger.error(f"Webhook failed for meeting {meeting_id}: {e} - falling back to polling")
 
+async def send_chunk_summary_to_discord(meeting_id: str, chunk_data: dict):
+    """Send chunk summary to Discord via webhook"""
+    try:
+        formatted_summary = summarization_service.format_chunk_summary_for_discord(chunk_data)
+        
+        webhook_data = {
+            "meeting_id": meeting_id,
+            "event": "chunk_summary",
+            "chunk_index": chunk_data["chunk_index"],
+            "time_range": chunk_data["time_range"],
+            "summary_content": formatted_summary,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        await send_webhook_notification(meeting_id, webhook_data)
+        
+        # Mark as sent in database
+        await meeting_manager.mark_chunk_summary_sent(meeting_id, chunk_data["chunk_index"])
+        
+        logger.info(f"Sent chunk summary to Discord for chunk {chunk_data['chunk_index']}")
+        
+    except Exception as e:
+        logger.error(f"Failed to send chunk summary to Discord: {e}")
+
 async def process_transcription(
     file_path: str,
     meeting_id: str,
@@ -143,12 +167,59 @@ async def process_transcription(
             # Update completed chunks count
             await meeting_manager.increment_completed_chunks(meeting_id)
             
-            # Check if all chunks are completed
+            # NEW: Try to determine chunk index and generate real-time chunk summary
+            try:
+                if chunk_index is not None:
+                    # Extract numeric chunk index
+                    numeric_chunk_index = int(chunk_index) if isinstance(chunk_index, str) and chunk_index.isdigit() else 0
+                    
+                    # Get chunk transcript data
+                    chunk_data = await meeting_manager.get_chunk_transcript_for_summary(
+                        meeting_id, numeric_chunk_index
+                    )
+                    
+                    if chunk_data and chunk_data.get('transcript_text'):
+                        logger.info(f"Generating real-time summary for chunk {numeric_chunk_index}")
+                        
+                        # Generate chunk summary
+                        chunk_summary_data = await summarization_service.create_realtime_chunk_summary(
+                            meeting_id=meeting_id,
+                            chunk_index=numeric_chunk_index,
+                            transcript_text=chunk_data['transcript_text'],
+                            participants=chunk_data.get('participants', []),
+                            chunk_start_time=chunk_data['chunk_start_time'],
+                            chunk_end_time=chunk_data['chunk_end_time']
+                        )
+                        
+                        # Save chunk summary to database
+                        await meeting_manager.save_chunk_summary(
+                            meeting_id=meeting_id,
+                            chunk_index=numeric_chunk_index,
+                            chunk_start_time=chunk_data['chunk_start_time'],
+                            chunk_end_time=chunk_data['chunk_end_time'],
+                            transcript_text=chunk_data['transcript_text'],
+                            summary_text=chunk_summary_data['summary_text'],
+                            key_points=chunk_summary_data['key_points'],
+                            participants=chunk_data.get('participants', [])
+                        )
+                        
+                        # Send chunk summary to Discord immediately
+                        await send_chunk_summary_to_discord(meeting_id, chunk_summary_data)
+                        
+                        logger.info(f"Real-time chunk summary completed for chunk {numeric_chunk_index}")
+                        
+            except Exception as chunk_error:
+                logger.error(f"Failed to generate chunk summary: {chunk_error}")
+                # Continue with normal processing even if chunk summary fails
+            
+            # Check if all chunks are completed for final summary
             if await meeting_manager.check_all_chunks_completed(meeting_id):
-                logger.info(f"All chunks completed for meeting {meeting_id}, triggering summarization")
-                await meeting_manager.trigger_hierarchical_summarization(meeting_id)
+                logger.info(f"All chunks completed for meeting {meeting_id}, generating final integrated summary")
                 
-                # Send webhook notification after summarization is complete
+                # Generate final integrated summary from all chunk summaries
+                await generate_final_integrated_summary(meeting_id)
+                
+                # Send webhook notification after final summarization is complete
                 webhook_data = {
                     "meeting_id": meeting_id,
                     "event": "meeting_completed",
@@ -171,6 +242,72 @@ async def process_transcription(
                 transcription_status="failed",
                 error_message=str(e)
             )
+
+async def generate_final_integrated_summary(meeting_id: str):
+    """Generate final integrated summary from all chunk summaries"""
+    try:
+        logger.info(f"Generating final integrated summary for meeting {meeting_id}")
+        
+        # Get meeting info
+        meeting_status = await meeting_manager.get_meeting_status(meeting_id)
+        if not meeting_status:
+            logger.error(f"Meeting not found: {meeting_id}")
+            return
+        
+        # Get all chunk summaries
+        chunk_summaries = await meeting_manager.get_all_chunk_summaries(meeting_id)
+        
+        if not chunk_summaries:
+            logger.warning(f"No chunk summaries found for meeting: {meeting_id}")
+            # Fallback to old hierarchical summarization
+            await meeting_manager.trigger_hierarchical_summarization(meeting_id)
+            return
+        
+        # Generate final integrated summary
+        participants = meeting_status.get('participants', [])
+        total_duration = meeting_status.get('duration_minutes', 0)
+        
+        integrated_summary_data = await summarization_service.create_final_integrated_summary(
+            meeting_id=meeting_id,
+            chunk_summaries=chunk_summaries,
+            total_duration=total_duration,
+            all_participants=participants
+        )
+        
+        # Save integrated summary to file
+        file_path = await summarization_service.save_summary(meeting_id, integrated_summary_data)
+        
+        # Save to database
+        await meeting_manager.save_summary(
+            meeting_id=meeting_id,
+            summary_content=integrated_summary_data['full_summary'],
+            summary_type='integrated_final',
+            file_path=file_path,
+            generated_by='ollama_integrated'
+        )
+        
+        # Update meeting status
+        await meeting_manager.update_meeting_status(meeting_id, 'completed')
+        await meeting_manager.update_processing_status(meeting_id, summarization_status='completed')
+        
+        # Send final summary to Discord
+        final_summary_webhook = {
+            "meeting_id": meeting_id,
+            "event": "final_summary",
+            "summary_content": f"# 🎙️ 最終議事録\n\n{integrated_summary_data['full_summary']}",
+            "timestamp": datetime.now().isoformat()
+        }
+        await send_webhook_notification(meeting_id, final_summary_webhook)
+        
+        logger.info(f"Final integrated summary completed for meeting: {meeting_id}")
+        
+    except Exception as e:
+        logger.error(f"Failed to generate final integrated summary: {e}")
+        await meeting_manager.update_processing_status(
+            meeting_id, 
+            summarization_status='failed',
+            error_message=str(e)
+        )
 
 # Pydantic models
 class TranscriptionRequest(BaseModel):
@@ -506,7 +643,7 @@ async def download_meeting_chunks_info(meeting_id: str):
                     "speaker_name": segment.get('speaker_name', ''),
                     "duration": segment.get('duration_seconds', 0),
                     "start_time": str(segment.get('start_time', '')),
-                    "download_url": f"/download/meeting/{meeting_id}/chunk/{filename}"
+                    "download_url": f"http://52.91.224.198:3003/audio/{filename}"
                 })
         
         chunks_data = {
@@ -556,6 +693,115 @@ async def download_audio_chunk(meeting_id: str, filename: str):
         
     except Exception as e:
         logger.error(f"Download audio chunk error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/meeting/{meeting_id}/chunk-summaries")
+async def get_chunk_summaries(meeting_id: str):
+    """Get all chunk summaries for a meeting"""
+    try:
+        chunk_summaries = await meeting_manager.get_all_chunk_summaries(meeting_id)
+        if not chunk_summaries:
+            raise HTTPException(status_code=404, detail="No chunk summaries found")
+        
+        return {
+            "meeting_id": meeting_id,
+            "chunk_summaries": chunk_summaries,
+            "total_chunks": len(chunk_summaries),
+            "timestamp": datetime.now()
+        }
+        
+    except Exception as e:
+        logger.error(f"Get chunk summaries error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/meeting/{meeting_id}/unsent-chunk-summaries")
+async def get_unsent_chunk_summaries(meeting_id: str):
+    """Get chunk summaries that haven't been sent to UI yet"""
+    try:
+        unsent_summaries = await meeting_manager.get_unsent_chunk_summaries(meeting_id)
+        
+        return {
+            "meeting_id": meeting_id,
+            "unsent_chunk_summaries": unsent_summaries,
+            "count": len(unsent_summaries),
+            "timestamp": datetime.now()
+        }
+        
+    except Exception as e:
+        logger.error(f"Get unsent chunk summaries error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/meeting/{meeting_id}/send-pending-summaries")
+async def send_pending_chunk_summaries(meeting_id: str):
+    """Send any pending chunk summaries to Discord"""
+    try:
+        unsent_summaries = await meeting_manager.get_unsent_chunk_summaries(meeting_id)
+        
+        sent_count = 0
+        for chunk_data in unsent_summaries:
+            try:
+                await send_chunk_summary_to_discord(meeting_id, chunk_data)
+                sent_count += 1
+            except Exception as e:
+                logger.error(f"Failed to send chunk {chunk_data['chunk_index']}: {e}")
+        
+        return {
+            "meeting_id": meeting_id,
+            "sent_count": sent_count,
+            "total_pending": len(unsent_summaries),
+            "timestamp": datetime.now()
+        }
+        
+    except Exception as e:
+        logger.error(f"Send pending summaries error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/meeting/{meeting_id}/generate-chunk-summary/{chunk_index}")
+async def generate_chunk_summary_manually(meeting_id: str, chunk_index: int):
+    """Manually generate chunk summary for a specific chunk"""
+    try:
+        # Get chunk transcript data
+        chunk_data = await meeting_manager.get_chunk_transcript_for_summary(
+            meeting_id, chunk_index
+        )
+        
+        if not chunk_data or not chunk_data.get('transcript_text'):
+            raise HTTPException(status_code=404, detail="No transcript data found for this chunk")
+        
+        # Generate chunk summary
+        chunk_summary_data = await summarization_service.create_realtime_chunk_summary(
+            meeting_id=meeting_id,
+            chunk_index=chunk_index,
+            transcript_text=chunk_data['transcript_text'],
+            participants=chunk_data.get('participants', []),
+            chunk_start_time=chunk_data['chunk_start_time'],
+            chunk_end_time=chunk_data['chunk_end_time']
+        )
+        
+        # Save chunk summary to database
+        await meeting_manager.save_chunk_summary(
+            meeting_id=meeting_id,
+            chunk_index=chunk_index,
+            chunk_start_time=chunk_data['chunk_start_time'],
+            chunk_end_time=chunk_data['chunk_end_time'],
+            transcript_text=chunk_data['transcript_text'],
+            summary_text=chunk_summary_data['summary_text'],
+            key_points=chunk_summary_data['key_points'],
+            participants=chunk_data.get('participants', [])
+        )
+        
+        # Send to Discord
+        await send_chunk_summary_to_discord(meeting_id, chunk_summary_data)
+        
+        return {
+            "meeting_id": meeting_id,
+            "chunk_index": chunk_index,
+            "summary_data": chunk_summary_data,
+            "status": "completed"
+        }
+        
+    except Exception as e:
+        logger.error(f"Manual chunk summary generation error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

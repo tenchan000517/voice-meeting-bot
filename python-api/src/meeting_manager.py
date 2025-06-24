@@ -7,7 +7,7 @@ import json
 import os
 from dotenv import load_dotenv
 
-from .models import Meeting, Transcript, Summary, ProcessingStatus, AudioFile, get_db, SessionLocal
+from .models import Meeting, Transcript, Summary, ProcessingStatus, AudioFile, ChunkSummary, get_db, SessionLocal
 
 load_dotenv()
 
@@ -696,6 +696,231 @@ class MeetingManager:
             
         except Exception as e:
             logger.error(f"Failed to get statistics: {e}")
+            return {}
+        finally:
+            db.close()
+    
+    async def save_chunk_summary(
+        self,
+        meeting_id: str,
+        chunk_index: int,
+        chunk_start_time: datetime,
+        chunk_end_time: datetime,
+        transcript_text: str,
+        summary_text: str,
+        key_points: str,
+        participants: List[str]
+    ) -> ChunkSummary:
+        """Save chunk summary to database"""
+        try:
+            db = self.db_session()
+            
+            # Check if chunk summary already exists
+            existing = db.query(ChunkSummary).filter(
+                and_(
+                    ChunkSummary.meeting_id == meeting_id,
+                    ChunkSummary.chunk_index == chunk_index
+                )
+            ).first()
+            
+            if existing:
+                # Update existing chunk summary
+                existing.chunk_end_time = chunk_end_time
+                existing.transcript_text = transcript_text
+                existing.summary_text = summary_text
+                existing.key_points = key_points
+                existing.participants = json.dumps(participants)
+                existing.generated_at = datetime.utcnow()
+                existing.sent_to_ui = False  # Reset sent flag
+                chunk_summary = existing
+            else:
+                # Create new chunk summary
+                chunk_summary = ChunkSummary(
+                    meeting_id=meeting_id,
+                    chunk_index=chunk_index,
+                    chunk_start_time=chunk_start_time,
+                    chunk_end_time=chunk_end_time,
+                    transcript_text=transcript_text,
+                    summary_text=summary_text,
+                    key_points=key_points,
+                    participants=json.dumps(participants),
+                    status='completed'
+                )
+                db.add(chunk_summary)
+            
+            db.commit()
+            
+            logger.info(f"Saved chunk summary for meeting {meeting_id}, chunk {chunk_index}")
+            return chunk_summary
+            
+        except Exception as e:
+            logger.error(f"Failed to save chunk summary: {e}")
+            db.rollback()
+            raise
+        finally:
+            db.close()
+    
+    async def mark_chunk_summary_sent(self, meeting_id: str, chunk_index: int) -> bool:
+        """Mark chunk summary as sent to UI"""
+        try:
+            db = self.db_session()
+            
+            chunk_summary = db.query(ChunkSummary).filter(
+                and_(
+                    ChunkSummary.meeting_id == meeting_id,
+                    ChunkSummary.chunk_index == chunk_index
+                )
+            ).first()
+            
+            if chunk_summary:
+                chunk_summary.sent_to_ui = True
+                db.commit()
+                logger.info(f"Marked chunk {chunk_index} as sent for meeting {meeting_id}")
+                return True
+            else:
+                logger.warning(f"Chunk summary not found: {meeting_id}, chunk {chunk_index}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Failed to mark chunk as sent: {e}")
+            db.rollback()
+            return False
+        finally:
+            db.close()
+    
+    async def get_unsent_chunk_summaries(self, meeting_id: str) -> List[Dict]:
+        """Get chunk summaries that haven't been sent to UI yet"""
+        try:
+            db = self.db_session()
+            
+            unsent_chunks = db.query(ChunkSummary).filter(
+                and_(
+                    ChunkSummary.meeting_id == meeting_id,
+                    ChunkSummary.sent_to_ui == False
+                )
+            ).order_by(ChunkSummary.chunk_index).all()
+            
+            result = []
+            for chunk in unsent_chunks:
+                participants = []
+                if chunk.participants:
+                    try:
+                        participants = json.loads(chunk.participants)
+                    except:
+                        participants = []
+                
+                result.append({
+                    'meeting_id': chunk.meeting_id,
+                    'chunk_index': chunk.chunk_index,
+                    'time_range': f"{chunk.chunk_index * 30}分〜{(chunk.chunk_index + 1) * 30}分",
+                    'chunk_start_time': chunk.chunk_start_time.isoformat(),
+                    'chunk_end_time': chunk.chunk_end_time.isoformat() if chunk.chunk_end_time else None,
+                    'transcript_text': chunk.transcript_text,
+                    'summary_text': chunk.summary_text,
+                    'key_points': chunk.key_points,
+                    'participants': participants,
+                    'generated_at': chunk.generated_at.isoformat()
+                })
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to get unsent chunk summaries: {e}")
+            return []
+        finally:
+            db.close()
+    
+    async def get_all_chunk_summaries(self, meeting_id: str) -> List[Dict]:
+        """Get all chunk summaries for a meeting"""
+        try:
+            db = self.db_session()
+            
+            chunks = db.query(ChunkSummary).filter(
+                ChunkSummary.meeting_id == meeting_id
+            ).order_by(ChunkSummary.chunk_index).all()
+            
+            result = []
+            for chunk in chunks:
+                participants = []
+                if chunk.participants:
+                    try:
+                        participants = json.loads(chunk.participants)
+                    except:
+                        participants = []
+                
+                result.append({
+                    'meeting_id': chunk.meeting_id,
+                    'chunk_index': chunk.chunk_index,
+                    'time_range': f"{chunk.chunk_index * 30}分〜{(chunk.chunk_index + 1) * 30}分",
+                    'chunk_start_time': chunk.chunk_start_time.isoformat(),
+                    'chunk_end_time': chunk.chunk_end_time.isoformat() if chunk.chunk_end_time else None,
+                    'transcript_text': chunk.transcript_text,
+                    'summary_text': chunk.summary_text,
+                    'key_points': chunk.key_points,
+                    'participants': participants,
+                    'generated_at': chunk.generated_at.isoformat(),
+                    'sent_to_ui': chunk.sent_to_ui
+                })
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to get chunk summaries: {e}")
+            return []
+        finally:
+            db.close()
+    
+    async def get_chunk_transcript_for_summary(self, meeting_id: str, chunk_index: int, chunk_duration_minutes: int = 30) -> Dict:
+        """Get transcript text for a specific chunk"""
+        try:
+            db = self.db_session()
+            
+            # Get meeting start time
+            meeting = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
+            if not meeting:
+                return {}
+            
+            # Calculate chunk time boundaries
+            chunk_start_offset = chunk_index * chunk_duration_minutes * 60  # seconds
+            chunk_end_offset = (chunk_index + 1) * chunk_duration_minutes * 60  # seconds
+            
+            chunk_start_time = meeting.start_time + timedelta(seconds=chunk_start_offset)
+            chunk_end_time = meeting.start_time + timedelta(seconds=chunk_end_offset)
+            
+            # Get transcripts within this chunk
+            transcripts = db.query(Transcript).filter(
+                and_(
+                    Transcript.meeting_id == meeting_id,
+                    Transcript.start_time >= chunk_start_time,
+                    Transcript.start_time < chunk_end_time
+                )
+            ).order_by(Transcript.start_time).all()
+            
+            if not transcripts:
+                return {}
+            
+            # Combine transcript texts
+            transcript_lines = []
+            speakers = set()
+            
+            for transcript in transcripts:
+                transcript_lines.append(f"[{transcript.speaker_name}]: {transcript.text}")
+                speakers.add(transcript.speaker_name)
+            
+            # Get actual end time (either last transcript or chunk boundary)
+            actual_end_time = min(transcripts[-1].end_time or chunk_end_time, chunk_end_time)
+            
+            return {
+                'meeting_id': meeting_id,
+                'chunk_index': chunk_index,
+                'chunk_start_time': chunk_start_time,
+                'chunk_end_time': actual_end_time,
+                'transcript_text': '\n'.join(transcript_lines),
+                'participants': list(speakers)
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get chunk transcript: {e}")
             return {}
         finally:
             db.close()

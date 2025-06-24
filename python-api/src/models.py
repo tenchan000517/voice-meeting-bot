@@ -82,6 +82,23 @@ class AudioFile(Base):
     scheduled_deletion = Column(DateTime, nullable=True)
     deleted = Column(Boolean, default=False)
 
+class ChunkSummary(Base):
+    """Real-time chunk summaries"""
+    __tablename__ = 'chunk_summaries'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    meeting_id = Column(String, nullable=False)
+    chunk_index = Column(Integer, nullable=False)  # 0, 1, 2... (30min chunks)
+    chunk_start_time = Column(DateTime, nullable=False)  # When this chunk started
+    chunk_end_time = Column(DateTime, nullable=True)  # When this chunk ended
+    transcript_text = Column(Text, nullable=False)  # Combined transcript for this chunk
+    summary_text = Column(Text, nullable=False)  # AI-generated summary
+    key_points = Column(Text, nullable=True)  # Key points from this chunk
+    participants = Column(Text, nullable=True)  # JSON array of participants in this chunk
+    status = Column(String, default='completed')  # completed, failed
+    generated_at = Column(DateTime, default=datetime.utcnow)
+    sent_to_ui = Column(Boolean, default=False)  # Whether sent to Discord/UI
+
 # Database connection setup
 DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///./meetings.db')
 engine = create_engine(DATABASE_URL, echo=False)
