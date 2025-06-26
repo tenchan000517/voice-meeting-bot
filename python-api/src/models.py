@@ -100,7 +100,7 @@ class ChunkSummary(Base):
     sent_to_ui = Column(Boolean, default=False)  # Whether sent to Discord/UI
 
 # Database connection setup
-DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///./meetings.db')
+from .config import DATABASE_URL
 engine = create_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

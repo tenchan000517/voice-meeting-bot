@@ -26,20 +26,20 @@ import logging.handlers
 import os
 from pathlib import Path
 
-# Create logs directory
-log_dir = Path(__file__).parent / "logs"
-log_dir.mkdir(exist_ok=True)
+# Create logs directory using config
+from src.config import LOG_DIR
+LOG_DIR.mkdir(exist_ok=True)
 
 # Configure rotating file handler
 error_handler = logging.handlers.RotatingFileHandler(
-    log_dir / "api-error.log",
+    LOG_DIR / "api-error.log",
     maxBytes=5*1024*1024,  # 5MB
     backupCount=3
 )
 error_handler.setLevel(logging.ERROR)
 
 access_handler = logging.handlers.RotatingFileHandler(
-    log_dir / "api-access.log", 
+    LOG_DIR / "api-access.log", 
     maxBytes=5*1024*1024,  # 5MB
     backupCount=3
 )
@@ -572,7 +572,8 @@ async def health_check():
 async def download_meeting_summary(meeting_id: str):
     """Download meeting summary as Markdown file"""
     try:
-        output_dir = Path(__file__).parent / "output"
+        from src.config import OUTPUT_DIR
+        output_dir = OUTPUT_DIR
         
         # Find the summary file for the meeting
         summary_files = list(output_dir.glob(f"meeting_{meeting_id}_*.md"))
@@ -893,7 +894,8 @@ async def download_final_summary(meeting_id: str):
             raise HTTPException(status_code=404, detail="Meeting not found")
         
         # Try to find the latest summary file
-        output_dir = Path(__file__).parent / "output"
+        from src.config import OUTPUT_DIR
+        output_dir = OUTPUT_DIR
         summary_files = list(output_dir.glob(f"meeting_{meeting_id}_*.md"))
         
         if not summary_files:
