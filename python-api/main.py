@@ -159,7 +159,7 @@ async def process_transcription(
                 speaker_name=f"User_{speaker_id}",
                 text=result["text"],
                 confidence=result.get("confidence", 0.0),
-                start_time=datetime.fromisoformat(result["timestamp"]) if result.get("timestamp") else datetime.utcnow(),
+                start_time=datetime.fromisoformat(result["timestamp"].replace('Z', '+00:00')) if result.get("timestamp") else datetime.utcnow(),
                 duration_seconds=result.get("duration", 0.0),
                 audio_file_path=file_path
             )
