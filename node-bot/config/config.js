@@ -4,8 +4,8 @@ module.exports = {
     // API接続設定
     pythonApi: {
         host: process.env.PYTHON_API_HOST || 'localhost',
-        port: process.env.PYTHON_API_PORT || 8001,
-        baseUrl: process.env.PYTHON_API_URL || 'http://localhost:8001'
+        port: process.env.PYTHON_API_PORT || 8000,
+        baseUrl: process.env.PYTHON_API_URL || 'http://localhost:8000'
     },
     
     // Discord設定
